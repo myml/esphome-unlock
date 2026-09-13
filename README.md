@@ -277,6 +277,41 @@ action: "string:123456 | delay:200 | combo:0x00:0x28"
 
 ---
 
+## 密码留空 = 这台设备不需要密码（必须挡住后续输入）
+
+**组件侧**：`password` 用**真值**判断，`password: ""` 与「不写」等价 ——
+平台规则校验（iOS 必须 `secure_connections` 等）只对"真要输密码"的项生效；
+单个 `profiles` 条目的密码为空是合法的（表示那台设备没有锁屏密码）。
+只有 `wake: false` 且**所有** profile 都没密码，才是配置错误。
+
+**但真正危险的在流程侧**：如果密码为空、流程却照旧发提交键，等于在锁屏上
+**「提交一次空密码」** —— 会计入失败尝试，反复触发甚至把设备锁掉。
+所以流程必须自己判断当前槽位有没有密码：
+
+```yaml
+      - if:
+          condition:
+            lambda: |-
+              std::string pw;
+              switch (id(kb)->active_host_slot()) {
+                case 0: pw = "${ipad_lock_pin}"; break;
+                case 1: pw = "${android_lock_pin}"; break;
+              }
+              return !pw.empty();
+          then:
+            - button.press: kb_type_password
+            - delay: 600ms
+            - espidf_ble_keyboard.run_action: ...   # 提交
+          else:
+            - logger.log: "密码为空，跳过输入与提交"
+```
+
+实测（把某个槽位的 PIN 置空）：报文只剩「唤醒 + 推到密码层」，
+**没有数字、没有提交键**，日志打印跳过提示。这正是无密码设备想要的 ——
+唤醒加推一下就可能直接解开了。
+
+---
+
 ## 坑
 
 * **不要在同一条配置里加 `esp32_ble_tracker` / `bluetooth_proxy`。** ESP32 只有一个
