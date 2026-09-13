@@ -76,7 +76,11 @@ DEFAULT_WAKE_MODIFIER = 0x02
 # 0x00 = 只按修饰键本身（上游明确支持 key_hold:0x01:0x00 这种写法）
 DEFAULT_WAKE_KEY = 0x00
 DEFAULT_WAKE_HOLD = 150
-DEFAULT_WAKE_DELAY = 2000
+# 实测（ESP32-C3 + Android 锁屏）：2000ms 会让**第一个按键**被吃掉 ——
+# 背光已经亮了，但锁屏的密码输入框还没准备好接收输入，于是 6 位密码变成 5 位。
+# 调到 4000ms 后正常。这个失败模式很隐蔽（在已经打开的文本框里不会复现，
+# 因为那时没有"框还没准备好"的过渡期），所以默认值直接取实测可用值。
+DEFAULT_WAKE_DELAY = 4000
 DEFAULT_KEY_DELAY = 200
 
 # USB HID Keyboard/Keypad usage 0x28 = Enter
@@ -227,6 +231,8 @@ PROFILE_SCHEMA = cv.Schema(
         ),
         cv.Optional(CONF_PASSWORD): _validate_password,
         cv.Optional(CONF_PRESS_ENTER): cv.boolean,
+        # 每个槽位可以有自己的唤醒等待 —— 各平台的锁屏就绪时间不一样
+        cv.Optional(CONF_WAKE_DELAY): cv.int_range(min=0, max=15000),
     }
 )
 
@@ -334,12 +340,12 @@ async def to_code(config):
     wake_delay = config[CONF_WAKE_DELAY]
     key_delay = config[CONF_KEY_DELAY]
 
-    def make(password, press_enter):
+    def make(password, press_enter, delay=None):
         parts = _wake_prefix(config)
         if password:
             # 只在真的发了唤醒脉冲之后才需要等屏幕亮
             if parts:
-                parts.append(f"delay:{wake_delay}")
+                parts.append(f"delay:{wake_delay if delay is None else delay}")
             parts.append(f"string:{password}")
             if press_enter:
                 parts.append(f"delay:{key_delay}")
@@ -352,7 +358,11 @@ async def to_code(config):
             press_enter = _resolve_press_enter(
                 profile.get(CONF_PRESS_ENTER), profile[CONF_OS]
             )
-            action = make(profile.get(CONF_PASSWORD), press_enter)
+            action = make(
+                profile.get(CONF_PASSWORD),
+                press_enter,
+                profile.get(CONF_WAKE_DELAY),
+            )
             _check_action(action, f"profiles[槽位 {profile[CONF_HOST_SLOT]}] ")
             cg.add(var.set_slot_action(profile[CONF_HOST_SLOT], action))
             _LOGGER.info(
