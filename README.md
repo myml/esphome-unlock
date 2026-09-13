@@ -324,6 +324,34 @@ sensor:
 （也可以只用一个 `sensor` 加 `state_class: total_increasing` 让 HA 自己累计，
 但那样就不能手改数值了。）
 
+### ⚠️ 坑：镜像 sensor 重启后若先漏出一个 0，长期统计会烂掉
+
+`state_class: total_increasing` 的语义是"只增不减"。**一旦它的值变小（比如重启
+时先冒出个 0），HA 会认定你换了新表、重新开始累计** —— 长期统计里就凭空多出
+一次重置，而且极难发现。
+
+`template` 的 `sensor` **天生不支持 `restore_value`**（只有 number / select /
+text / datetime 有），所以不能靠"让 sensor 也持久化"来解决。正确做法是两头都管：
+
+1. `number` 开 `restore_value: true`（它自己会从 flash 恢复）；
+2. 镜像 `sensor` 设 `update_interval: never`（**根本不轮询**，杜绝"先读到默认值
+   就发出去"）；
+3. 在 `esphome.on_boot` 里主动推一次，且**优先级必须低于 800** ——
+   `TemplateNumber::get_setup_priority()` 返回 `setup_priority::HARDWARE = 800`，
+   而 on_boot 的数值越**小**越晚执行，用 600（DATA）就确定性地排在恢复之后
+   （不是"碰巧同级"，别改成 800 或更大）：
+
+```yaml
+esphome:
+  on_boot:
+    - priority: 600        # < HARDWARE(800)，确保 number 已恢复
+      then:
+        - lambda: |-
+            id(energy_kwh_sensor).publish_state(id(energy_kwh).state);
+```
+
+实测：写入 `7.777` → 重启 → 读回 `7.777`，中途没有出现 0。
+
 ### 另一条前提：这块板测不到真实用电
 
 板上没有电流计（5V 来自 USB 供电），所以上面这个数值**是你手工填或自动化写的，
