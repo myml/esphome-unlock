@@ -28,6 +28,7 @@ DEPENDENCIES = ["espidf_ble_keyboard"]
 CONF_KEYBOARD_ID = "keyboard_id"
 CONF_PASSWORD = "password"
 CONF_OS = "os"
+CONF_HOST_SLOT = "host_slot"
 CONF_WAKE_MODIFIER = "wake_modifier"
 CONF_WAKE_KEY = "wake_key"
 CONF_WAKE_HOLD = "wake_hold"
@@ -89,6 +90,29 @@ def _build_action(config):
     return " | ".join(parts)
 
 
+def _effective_security(upstream, host_slot):
+    """算出这个按钮所在槽位**实际生效**的 (passkey, 是否安全连接)。
+
+    上游的配对参数可以按槽位覆盖：`hosts:` 里的条目带 passkey 时，该槽位就用它的
+    passkey 和 passkey_mode（不写 passkey 的条目不会覆盖任何东西 —— 上游只在
+    `if CONF_PASSKEY in host` 时才调用 set_host_slot_passkey）。没被覆盖就继承全局。
+    """
+    passkey = upstream.get("passkey")
+    sc = upstream.get("passkey_mode", "legacy") == PASSKEY_MODE_SECURE_CONNECTIONS
+
+    if host_slot is not None:
+        for entry in upstream.get("hosts") or ():
+            if entry.get("slot") == host_slot:
+                if "passkey" in entry:
+                    passkey = entry["passkey"]
+                    sc = (
+                        entry.get("passkey_mode", "legacy")
+                        == PASSKEY_MODE_SECURE_CONNECTIONS
+                    )
+                break
+    return passkey, sc
+
+
 def _final_validate(config):
     """平台规则校验：只在「这个按钮真的要输密码」时才有意义。
 
@@ -106,22 +130,39 @@ def _final_validate(config):
         return config
 
     os_name = config[CONF_OS]
-    mode = upstream.get("passkey_mode", "legacy")
-    passkey = upstream.get("passkey")
+    host_slot = config.get(CONF_HOST_SLOT)
 
-    if os_name == OS_IOS and mode != PASSKEY_MODE_SECURE_CONNECTIONS:
+    # host_slot 要落在 host_slots 范围内，否则上游根本不会为这个槽位配对
+    host_slots = upstream.get("host_slots", 4)
+    if host_slot is not None and host_slot >= host_slots:
         raise cv.Invalid(
-            "os: ios 要求上游 espidf_ble_keyboard 用 passkey_mode: "
-            f"secure_connections，当前是 '{mode}'。legacy 配对在 iOS 上不工作 —— "
-            "症状是配对失败，或者表面配对成功但按键完全没反应。",
+            f"host_slot 是 {host_slot}，但上游 espidf_ble_keyboard 的 host_slots "
+            f"只有 {host_slots}（合法范围 0–{host_slots - 1}）。",
+            [CONF_HOST_SLOT],
+        )
+
+    passkey, secure_connections = _effective_security(upstream, host_slot)
+    mode = "secure_connections" if secure_connections else "legacy"
+
+    if os_name == OS_IOS and not secure_connections:
+        hint = (
+            f"第 {host_slot} 号槽位" if host_slot is not None else "全局"
+        )
+        raise cv.Invalid(
+            f"os: ios 要求{ hint }的 passkey_mode 是 secure_connections，"
+            f"当前生效的是 '{mode}'。legacy 配对在 iOS 上不工作 —— "
+            "症状是配对失败，或者表面配对成功但按键完全没反应。"
+            "（用 host_slots 时记得在该槽位的 hosts: 条目里写上 passkey，"
+            "上游只在条目带 passkey 时才应用它的 passkey_mode。）",
             [CONF_OS],
         )
 
     if os_name == OS_ANDROID and passkey is not None:
         _LOGGER.warning(
-            "os: android 的上游 espidf_ble_keyboard 设了 passkey，但 Android 的 "
-            "BLE HID 不支持 passkey 配对，实际会退化成 Just Works（无认证）。"
-            "建议删掉上游的 passkey；若同一块板还要伺候 iOS，请改用 host_slots 分槽。"
+            "os: android 生效的配对参数里有 passkey，但 Android 的 BLE HID "
+            "不支持 passkey 配对，实际会退化成 Just Works（无认证）。"
+            "建议删掉该槽位的 passkey；若同一块板还要伺候 iOS，请把 iOS "
+            "单独放进另一个 host_slot 并只在那里设 passkey。"
         )
 
     return config
@@ -140,6 +181,9 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_OS, default=OS_ANDROID): cv.one_of(
                 OS_ANDROID, OS_IOS, lower=True
             ),
+            # 一台板子可以分槽伺候多台设备（上游 host_slots）。写了槽位号，
+            # 平台规则校验就会按该槽位**实际生效**的配对参数来判断，而不是全局的。
+            cv.Optional(CONF_HOST_SLOT): cv.int_range(min=0, max=9),
             # 不填 = 只唤醒，不输密码（例如设备本来就没锁屏密码）
             cv.Optional(CONF_PASSWORD): _validate_password,
             cv.Optional(CONF_WAKE_MODIFIER, default=DEFAULT_WAKE_MODIFIER): cv.hex_uint8_t,
