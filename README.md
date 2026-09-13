@@ -277,6 +277,56 @@ action: "string:123456 | delay:200 | combo:0x00:0x28"
 
 ---
 
+## 用「下拉框」代替多个切槽按钮（含「关闭」）
+
+比起 3 个 `switch_host` 按钮 + 1 个状态文本传感器，一个 `select` 更省实体：
+它**同时**显示当前模式和切换模式。关键是用到上游两个 **public C++ 方法**
+（文档里没提，是翻 `espidf_ble_keyboard.h` 找到的）：
+
+| 方法 | 作用 |
+|---|---|
+| `slot_broadcasts(slot)` | 该槽位当前是否广播 |
+| `set_slot_broadcast(slot, on)` | 设置广播；**对活动槽位置 false 会直接断开当前主机**（内部 `esp_ble_gatts_close`）并停广播 → 这就是「关闭」 |
+
+```yaml
+select:
+  - platform: template
+    name: "模式"
+    options: ["关闭", "${mode_0}", "${mode_1}"]
+    update_interval: 5s
+    lambda: |-
+      const uint8_t slot = id(kb)->active_host_slot();
+      if (!id(kb)->slot_broadcasts(slot)) return std::string("关闭");
+      switch (slot) { case 0: return std::string("${mode_0}"); }
+      return std::string("关闭");
+    set_action:
+      - lambda: |-
+          if (x == "关闭") {
+            id(kb)->set_slot_broadcast(id(kb)->active_host_slot(), false);
+          } else {
+            int slot = (x == "${mode_0}") ? 0 : 1;
+            id(kb)->set_slot_broadcast(slot, true);   // 可能之前被关过
+            id(kb)->switch_host(slot);
+          }
+          id(mode_select).publish_state(x);           // 立刻反馈，不等下次轮询
+```
+
+几点实测确认过的行为：
+
+* **不会闪回旧值**：`switch_host()` 是**同步**设置 `active_slot_` 并立刻发布传感器
+  状态的，所以选完下拉框不会先跳回旧选项。
+* **「关闭」会持久化**（写 NVS `bcast` 键）：关掉某个槽位后重启，它仍然不广播。
+  重新选中该模式即可恢复（`set_slot_broadcast(slot, true)`）。
+* 上游对「永不广播的槽位」有完整语义：切过去会断开当前主机、电台静默、
+  哪里都显示 "No BLE" —— 这正是我们要的「关闭」。
+
+> 命名提醒：ESPHome 会把非 ASCII 实体名按**字符数**转成下划线，
+> 于是 `输入密码` 和 `重启键盘`（都是 4 字符）会**撞名报错**
+> （`Both convert to ASCII ID: '____'`）。给中文名加个 ASCII 后缀
+> （`输入密码 (type)`）既解决冲突也更易读。
+
+---
+
 ## 密码留空 = 这台设备不需要密码（必须挡住后续输入）
 
 **组件侧**：`password` 用**真值**判断，`password: ""` 与「不写」等价 ——
