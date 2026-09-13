@@ -60,6 +60,7 @@ CONF_PASSWORD = "password"
 CONF_OS = "os"
 CONF_HOST_SLOT = "host_slot"
 CONF_PROFILES = "profiles"
+CONF_WAKE = "wake"
 CONF_WAKE_MODIFIER = "wake_modifier"
 CONF_WAKE_KEY = "wake_key"
 CONF_WAKE_HOLD = "wake_hold"
@@ -114,6 +115,9 @@ def _resolve_press_enter(explicit, os_name):
 
 
 def _wake_prefix(config):
+    """唤醒脉冲。`wake: false` 时返回空 —— 用于「纯输入」诊断。"""
+    if not config[CONF_WAKE]:
+        return []
     return [
         f"key_hold:0x{config[CONF_WAKE_MODIFIER]:02X}:0x{config[CONF_WAKE_KEY]:02X}",
         f"delay:{config[CONF_WAKE_HOLD]}",
@@ -245,6 +249,19 @@ def _validate_not_both(config):
             if slot in seen:
                 raise cv.Invalid(f"profiles 里槽位 {slot} 出现了两次")
             seen.add(slot)
+            if not config[CONF_WAKE] and CONF_PASSWORD not in profile:
+                raise cv.Invalid(
+                    f"profiles 里槽位 {slot} 既没写 password，顶层又设了 "
+                    "wake: false —— 这个按钮会什么都不做。"
+                )
+    if (
+        CONF_PROFILES not in config
+        and not config[CONF_WAKE]
+        and CONF_PASSWORD not in config
+    ):
+        raise cv.Invalid(
+            "wake: false 且没写 password —— 这个按钮会什么都不做。"
+        )
     return config
 
 
@@ -264,6 +281,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_PROFILES): cv.All(
                 cv.ensure_list(PROFILE_SCHEMA), cv.Length(min=1, max=10)
             ),
+            # 关掉唤醒脉冲：用于「纯输入」诊断，或在屏幕本来就亮着的场景下
+            # 避免那一下 Shift 干扰（有用户遇到过唤醒脉冲把首字符变成符号）。
+            cv.Optional(CONF_WAKE, default=True): cv.boolean,
             cv.Optional(CONF_WAKE_MODIFIER, default=DEFAULT_WAKE_MODIFIER): cv.hex_uint8_t,
             cv.Optional(CONF_WAKE_KEY, default=DEFAULT_WAKE_KEY): cv.hex_uint8_t,
             cv.Optional(CONF_WAKE_HOLD, default=DEFAULT_WAKE_HOLD): cv.int_range(
@@ -317,7 +337,9 @@ async def to_code(config):
     def make(password, press_enter):
         parts = _wake_prefix(config)
         if password:
-            parts.append(f"delay:{wake_delay}")
+            # 只在真的发了唤醒脉冲之后才需要等屏幕亮
+            if parts:
+                parts.append(f"delay:{wake_delay}")
             parts.append(f"string:{password}")
             if press_enter:
                 parts.append(f"delay:{key_delay}")
