@@ -219,11 +219,13 @@ def _final_validate(config):
     if not upstream:
         return config
 
-    if CONF_PASSWORD in config:
+    # 用真值判断而不是「键是否存在」：password: "" 与「不写 password」等价，
+    # 都表示「这台设备不需要密码」。
+    if config.get(CONF_PASSWORD):
         _check_platform(upstream, config[CONF_OS], config.get(CONF_HOST_SLOT), "")
 
     for i, profile in enumerate(config.get(CONF_PROFILES) or ()):
-        if CONF_PASSWORD not in profile:
+        if not profile.get(CONF_PASSWORD):
             continue
         where = f"profiles[{i}]（槽位 {profile[CONF_HOST_SLOT]}）："
         _check_platform(upstream, profile[CONF_OS], profile[CONF_HOST_SLOT], where)
@@ -269,18 +271,23 @@ def _validate_not_both(config):
             if slot in seen:
                 raise cv.Invalid(f"profiles 里槽位 {slot} 出现了两次")
             seen.add(slot)
-            if not config[CONF_WAKE] and CONF_PASSWORD not in profile:
-                raise cv.Invalid(
-                    f"profiles 里槽位 {slot} 既没写 password，顶层又设了 "
-                    "wake: false —— 这个按钮会什么都不做。"
-                )
+        # 单个 profile 的 password 为空是**合法**的 —— 表示「这台设备没有密码，
+        # 流程走到这里就停」，不该报错。只有整个按钮在所有槽位下都做不了任何事
+        # （wake 关着、且每个 profile 都没密码）才算配置错误。
+        if not config[CONF_WAKE] and not any(
+            p.get(CONF_PASSWORD) for p in config[CONF_PROFILES]
+        ):
+            raise cv.Invalid(
+                "wake: false 且所有 profile 的 password 都为空 —— "
+                "这个按钮在任何槽位下都什么都不做。"
+            )
     if (
         CONF_PROFILES not in config
         and not config[CONF_WAKE]
-        and CONF_PASSWORD not in config
+        and not config.get(CONF_PASSWORD)
     ):
         raise cv.Invalid(
-            "wake: false 且没写 password —— 这个按钮会什么都不做。"
+            "wake: false 且 password 为空（或没写）—— 这个按钮会什么都不做。"
         )
     return config
 
