@@ -1,0 +1,79 @@
+# 一块 ESP32 板 = 一个 BLE 身份，解锁一台 Android 平板。
+#
+# 关键平台规则（本组件会在编译期替你检查）：
+#   * Android 的 BLE HID **不支持 passkey 配对**，必须走 Just Works
+#     —— 所以这里【故意不写】passkey。写了本组件会给出警告。
+#   * 平板侧必须用 PIN / 密码锁屏；图案锁收不到键盘输入。
+#   * 部分 ROM 深度睡眠时会断 BLE，把系统蓝牙加进省电白名单。
+
+substitutions:
+  device_name: unlock-android
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_BT_ENABLED: y
+      CONFIG_BT_CONTROLLER_ENABLED: y
+      CONFIG_BT_BLUEDROID_ENABLED: y
+      CONFIG_BT_NIMBLE_ENABLED: n
+      CONFIG_BT_BLE_ENABLED: y
+      CONFIG_BT_GATTS_ENABLE: y
+      CONFIG_BT_BLE_42_FEATURES_SUPPORTED: y
+      CONFIG_BT_BLE_50_FEATURES_SUPPORTED: n
+      CONFIG_BT_BLE_42_ADV_EN: y
+      CONFIG_BT_BLE_42_SCAN_EN: y
+      CONFIG_BT_BLE_SMP_ENABLE: y
+      CONFIG_BT_ACL_CONNECTIONS: "4"
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Unlock Fallback Hotspot"
+    password: !secret ap_password
+
+captive_portal:
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/markusg1234/ESPHome-espidf_ble_keyboard
+      ref: main
+      path: components
+    refresh: 0s
+    components: [ espidf_ble_keyboard ]
+
+  - source:
+      type: git
+      url: https://github.com/myml/esphome-unlock
+      ref: main
+    refresh: 0s
+    components: [ unlock_keyboard ]
+
+espidf_ble_keyboard:
+  id: kb
+  device_name: "unlock_android"
+  # 没有 passkey = Just Works。Android 上这是唯一可行的配对方式。
+  passkey_mode: legacy
+  host_slots: 1
+
+button:
+  - platform: unlock_keyboard
+    keyboard_id: kb
+    name: "Unlock Android Tablet"
+    os: android
+    password: !secret tablet_lock_pin
+    # Android 的密码框通常要显式回车（os: android 时 press_enter 默认为 true）
+    wake_delay: 1500
