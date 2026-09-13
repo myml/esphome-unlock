@@ -69,6 +69,8 @@ external_components:
 
 ## 配置
 
+### 固定模式：一块板伺候一台设备
+
 ```yaml
 button:
   - platform: unlock_keyboard
@@ -78,11 +80,40 @@ button:
     password: !secret ipad_lock_pin   # 可选；不填 = 只唤醒
 ```
 
+### 分发模式：一个按钮解锁「当前连着的设备」
+
+一块板挂了多台设备（上游 `host_slots`）时，按下时读上游的 `active_host_slot()`，
+挑当前那台对应的密码，所以 HA 里只需要**一个实体**：
+
+```yaml
+button:
+  - platform: unlock_keyboard
+    keyboard_id: kb
+    name: "Unlock Current Tablet"
+    profiles:
+      - host_slot: 0
+        os: ios
+        password: !secret ipad_lock_pin
+      - host_slot: 1
+        os: android
+        password: !secret tablet_lock_pin
+```
+
+每个 profile 可以有自己的 `os` / `password` / `press_enter`，与上游的槽位一一对应。
+当前槽位没配 profile 时，按钮**只唤醒**（不会拿错密码去开锁）。
+
+> 前提是槽位切换正确。用上游的 `switch_host:N` 按钮或 `switch_host` 服务切槽，
+> 切换需要 1–3 秒 —— 自动化里请等 `binary_sensor`（`type: paired`）变 `on` 再按解锁。
+
+### 选项
+
 | 选项 | 默认 | 说明 |
 |---|---|---|
 | `keyboard_id` | **必填** | 上游 `espidf_ble_keyboard` 的 id |
+| `profiles` | 无 | 槽位列表，每项 `host_slot` + `os`/`password`/`press_enter`。与顶层 `password` 互斥 |
 | `os` | `android` | 决定 `press_enter` 的默认值，并触发平台规则校验 |
 | `password` | 无 | 锁屏 PIN。**不填 = 只唤醒**。不能含 `\|` 或换行 |
+| `host_slot` | 无 | 固定模式下说明本按钮对应哪个槽位，让平台规则按该槽位生效的参数判断 |
 | `press_enter` | 按 `os` 自动 | 打完密码后是否补一个回车（Enter，HID `0x28`）。Android 默认 `true`，iOS 默认 `false` —— iOS 的密码框位数够了会自己提交 |
 | `wake_modifier` | `0x02` | 唤醒脉冲用的修饰键。`0x02`=左 Shift、`0x01`=左 Ctrl、`0x04`=左 Alt |
 | `wake_key` | `0x00` | 唤醒脉冲按的主键。`0x00` = 只按修饰键本身（上游明确支持这种写法） |
@@ -163,6 +194,9 @@ Android 的 BLE HID **不支持 passkey 配对**，设了也会退化成 Just Wo
 
 ## Home Assistant 自动化
 
+按钮就是普通的 `button` 实体，直接按即可。一块板挂多台设备时，
+`profiles:` 那一个按钮解锁的就是「当前连着的那台」：
+
 ```yaml
 - alias: "回家唤醒并解锁平板"
   triggers:
@@ -172,11 +206,28 @@ Android 的 BLE HID **不支持 passkey 配对**，设了也会退化成 Just Wo
   actions:
     - action: button.press
       target:
-        entity_id: button.unlock_ipad
+        entity_id: button.aibox0_unlock_current_tablet
 ```
 
-上游还提供 `binary_sensor`（`type: paired`）和 `sensor`（`type: active_host`）。
-如果需要「确认连上了再发密码」，用它们做条件；切槽位需要 1–3 秒，抢跑发的按键会全丢。
+如果要指定解锁哪一台，先切槽位、**等连上**再按 —— 切槽需要 1–3 秒，
+抢跑发的按键会全丢：
+
+```yaml
+    - action: button.press
+      target: { entity_id: button.aibox0_kb_host_ipad }
+    - wait_for_trigger:
+        - trigger: state
+          entity_id: binary_sensor.aibox0_keyboard_paired
+          from: "off"
+          to: "on"
+      timeout: "00:00:20"
+      continue_on_timeout: false
+    - action: button.press
+      target: { entity_id: button.aibox0_ipad_unlock }
+```
+
+上游还提供 `binary_sensor`（`type: paired`）和 `sensor`（`type: active_host`），
+前者用来等连接、后者用来在自动化里判断当前在哪台设备上。
 
 ---
 
