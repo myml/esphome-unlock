@@ -76,11 +76,25 @@ DEFAULT_WAKE_MODIFIER = 0x02
 # 0x00 = 只按修饰键本身（上游明确支持 key_hold:0x01:0x00 这种写法）
 DEFAULT_WAKE_KEY = 0x00
 DEFAULT_WAKE_HOLD = 150
-# 实测（ESP32-C3 + Android 锁屏）：2000ms 会让**第一个按键**被吃掉 ——
-# 背光已经亮了，但锁屏的密码输入框还没准备好接收输入，于是 6 位密码变成 5 位。
-# 调到 4000ms 后正常。这个失败模式很隐蔽（在已经打开的文本框里不会复现，
-# 因为那时没有"框还没准备好"的过渡期），所以默认值直接取实测可用值。
-DEFAULT_WAKE_DELAY = 4000
+# 【硬约束：别把这个值调大】这个延迟是写在 action 字符串里的，执行时**同步阻塞**
+# 主循环。ESP32-C3 是单核，任务看门狗 5 秒，实测阻塞 ~4.8s 就会 Task WDT 重启
+# （重启还会触发 OTA 回滚，症状是"改了配置但设备跑的永远是旧版"）。
+#
+# 而 Android 锁屏实测需要等 ~4 秒（2 秒会让第一个按键被输入框就绪过程吃掉，
+# 6 位密码变 5 位）—— 4s 等待 + 打字正好压线，所以**不要把这段等待放进 action 串**。
+# 正确做法：设备侧只发短脉冲，等待交给 ESPHome 调度器的 delay（非阻塞）：
+#
+#   - platform: template
+#     name: "Unlock Current Tablet"
+#     on_press:
+#       - espidf_ble_keyboard.run_action: {id: kb, action: "key_hold:0x02:0x00 | delay:150 | release"}
+#       - delay: 4s                 # 调度器等待，不阻塞主循环
+#       - button.press: kb_type_password
+#
+# 这个默认值只保证"不崩"，不保证解锁成功（2 秒对 Android 不够）。
+DEFAULT_WAKE_DELAY = 2000
+# 超过这个值就警告 —— 4s 等待 + 打字已经接近 5 秒看门狗线
+WAKE_DELAY_WARN = 3000
 DEFAULT_KEY_DELAY = 200
 
 # USB HID Keyboard/Keypad usage 0x28 = Enter
@@ -317,6 +331,14 @@ def _check_action(action, label):
             f"{label}生成了 {steps} 步，超过 espidf_ble_keyboard 的 "
             f"MAX_ACTION_DEPTH({MAX_ACTION_STEPS})，最后几步会被丢弃。"
             f"生成结果: {action}"
+        )
+    if config[CONF_WAKE_DELAY] > WAKE_DELAY_WARN:
+        _LOGGER.warning(
+            "wake_delay 是 %dms。它是写在 action 串里**同步阻塞**执行的："
+            "单核芯片（ESP32-C3 等）任务看门狗 5 秒，实测阻塞 ~4.8s 就会重启，"
+            "重启还会触发 OTA 回滚。建议把等待移到 ESPHome 的 delay 动作里"
+            "（非阻塞），设备侧只发短按键。",
+            config[CONF_WAKE_DELAY],
         )
     if len(action) > WARN_ACTION_LENGTH:
         _LOGGER.warning(
