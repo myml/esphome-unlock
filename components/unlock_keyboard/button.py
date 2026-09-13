@@ -323,6 +323,19 @@ CONFIG_SCHEMA = cv.All(
 )
 
 
+def _warn_if_blocking(wake_delay, label=""):
+    """wake_delay 写在 action 串里是同步阻塞执行的，提示看门狗风险。"""
+    if wake_delay > WAKE_DELAY_WARN:
+        _LOGGER.warning(
+            "%swake_delay 是 %dms。它是写在 action 串里**同步阻塞**执行的："
+            "单核芯片（ESP32-C3 等）任务看门狗 5 秒，实测阻塞 ~4.8s 就会重启，"
+            "重启还会触发 OTA 回滚。建议把等待移到 ESPHome 的 delay 动作里"
+            "（非阻塞），设备侧只发短按键。",
+            label,
+            wake_delay,
+        )
+
+
 def _check_action(action, label):
     steps = len(action.split("|"))
     if steps > MAX_ACTION_STEPS:
@@ -331,14 +344,6 @@ def _check_action(action, label):
             f"{label}生成了 {steps} 步，超过 espidf_ble_keyboard 的 "
             f"MAX_ACTION_DEPTH({MAX_ACTION_STEPS})，最后几步会被丢弃。"
             f"生成结果: {action}"
-        )
-    if config[CONF_WAKE_DELAY] > WAKE_DELAY_WARN:
-        _LOGGER.warning(
-            "wake_delay 是 %dms。它是写在 action 串里**同步阻塞**执行的："
-            "单核芯片（ESP32-C3 等）任务看门狗 5 秒，实测阻塞 ~4.8s 就会重启，"
-            "重启还会触发 OTA 回滚。建议把等待移到 ESPHome 的 delay 动作里"
-            "（非阻塞），设备侧只发短按键。",
-            config[CONF_WAKE_DELAY],
         )
     if len(action) > WARN_ACTION_LENGTH:
         _LOGGER.warning(
@@ -361,6 +366,7 @@ async def to_code(config):
     name = config.get("name", "?")
     wake_delay = config[CONF_WAKE_DELAY]
     key_delay = config[CONF_KEY_DELAY]
+    _warn_if_blocking(wake_delay, f"'{name}'：")
 
     def make(password, press_enter, delay=None):
         parts = _wake_prefix(config)
