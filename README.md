@@ -277,6 +277,61 @@ action: "string:123456 | delay:200 | combo:0x00:0x28"
 
 ---
 
+## 一个可在 HA 编辑的 kWh 实体（以及为什么需要两个实体）
+
+**HA 的能源仪表板只接受 `sensor`**，而且要求 `device_class: energy` +
+`state_class: total_increasing`。**`number` 实体选不进去** —— 所以想让
+「能在 HA 编辑」和「能接能源仪表板」同时成立，需要两个实体：
+
+```yaml
+number:
+  - platform: template
+    name: "电量输入 (kWh, 可编辑)"
+    id: energy_kwh
+    min_value: 0
+    max_value: 1000000
+    step: 0.001
+    mode: box                 # 输入框（而非滑块）
+    optimistic: true          # 由 HA 直接写
+    restore_value: true       # 跨重启保持
+    initial_value: 0
+    on_value:                 # 编辑后立刻同步，不等 60s 轮询
+      - sensor.template.publish:
+          id: energy_kwh_sensor
+          state: !lambda 'return x;'
+
+sensor:
+  - platform: template
+    name: "累计电量 (energy)"
+    id: energy_kwh_sensor
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 3
+    update_interval: 60s
+    lambda: 'return id(energy_kwh).state;'
+```
+
+### ⚠️ 坑：带前缀的单位会被换算，`initial_value` 会错 1000 倍
+
+模板 number 一旦写 `unit_of_measurement: "kWh"`，ESPHome 会把它换算到基准单位，
+于是 **`initial_value: 0` 显示出来是 `1000`**。更要命的是：
+
+* 运行期由 HA 写入的值是 **1:1 透传**的（设 2.5 就读到 2.5），
+* 所以**只有初始值错**，看起来像"以前存下来的残留值"，很难联想到单位换算。
+
+**做法：让 `number` 不带单位**，单位只由那个 `sensor` 承担。
+（也可以只用一个 `sensor` 加 `state_class: total_increasing` 让 HA 自己累计，
+但那样就不能手改数值了。）
+
+### 另一条前提：这块板测不到真实用电
+
+板上没有电流计（5V 来自 USB 供电），所以上面这个数值**是你手工填或自动化写的，
+不是实测值**。要真实计量得外接 INA219 / INA226 / PZEM 之类的传感器，
+再把它接到 `battery_level:` 或作为 `energy` 传感器的来源。
+
+---
+
 ## 用「下拉框」代替多个切槽按钮（含「关闭」）
 
 比起 3 个 `switch_host` 按钮 + 1 个状态文本传感器，一个 `select` 更省实体：
